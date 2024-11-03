@@ -1,0 +1,25 @@
+{
+  "name": "discord-reels-consumer-bot",
+  "version": "1.0.0",
+  "main": "index.js",
+  "scripts": {
+    "dev": "nodemon bot.js",
+    "pm2-start": "pm2 start bot.js --name discord-reels-consumer-bot",
+    "pm2-stop": "pm2 stop discord-reels-consumer-bot",
+    "pm2-restart": "pm2 restart discord-reels-consumer-bot",
+    "pm2-log": "pm2 logs discord-reels-consumer-bot"
+  },
+  "keywords": [],
+  "author": "vestels",
+  "license": "ISC",
+  "description": "",
+  "dependencies": {
+    "axios": "^1.7.7",
+    "discord.js": "^14.16.3",
+    "dotenv": "^16.4.5",
+    "ffmpeg-cli": "^2.7.5",
+    "ffmpeg-static": "^5.2.0",
+    "fluent-ffmpeg": "^2.1.3",
+    "pm2": "^5.4.2"
+  }
+}
