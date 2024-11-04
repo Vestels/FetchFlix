@@ -26,3 +26,5 @@ Facebook Videos / Reels and Instagram Reels automatically embedded videos from l
   - https://www.instagram.com/reel/VIDEO_ID/
   - https://www.instagram.com/p/VIDEO_ID/
   - https://www.instagram.com/USERNAME/media/
+
+</br>![Gif](https://github.com/Vestels/FetchFlix/blob/main/showcase/fetchflixusage.gif)
