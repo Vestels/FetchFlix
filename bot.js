@@ -2,14 +2,14 @@ const { Client, GatewayIntentBits } = require('discord.js');
 const axios = require('axios');
 const fs = require('fs');
 const path = require('path');
-const ffmpeg = require('ffmpeg-cli');
+const ffmpeg = require('fluent-ffmpeg');
 const { REST } = require('@discordjs/rest');
 const { Routes } = require('discord-api-types/v9');
 require('dotenv').config();
 
 const client = new Client({ intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.MessageContent] });
 
-const videoRegex = /https?:\/\/(?:www\.)?(facebook\.com\/(?:watch\/\?v=|username\/videos\/|video\.php\?v=|share\/(?:r|v)\/|videos\/\w+|[\d]+\/videos\/[\d]+(?:\?__so__=permalink)?)|instagram\.com\/(?:reel\/|p\/|USERNAME\/media\/))([\w-]+)/i;
+const videoRegex = /https?:\/\/(?:www\.)?(facebook\.com\/(?:watch\?v=\d+|username\/videos\/|video\.php\?v=|share\/(?:r|v)\/|videos\/\w+|[\d]+\/videos\/[\d]+|reel\/[\d]+(?:\?s=[\w-]+)?(?:&fs=[\w-]+)?|reel\/\w+)|fb\.watch\/[\w-]+|instagram\.com\/(?:reel\/|p\/|USERNAME\/media\/))/i;
 
 const specialUserId = '373834322379014146';
 const videosDir = path.join(__dirname, 'videos');
@@ -17,7 +17,10 @@ if (!fs.existsSync(videosDir)) {
   fs.mkdirSync(videosDir);
 }
 
-function clearVideosDirectory() {
+async function cleanOldVideos() {
+  const currentTime = Date.now();
+  const expirationTime = (10 * 60) * 1000;
+
   fs.readdir(videosDir, (err, files) => {
     if (err) {
       console.error('Error reading the videos directory:', err);
@@ -26,25 +29,61 @@ function clearVideosDirectory() {
 
     files.forEach(file => {
       const filePath = path.join(videosDir, file);
-      fs.unlink(filePath, (err) => {
+      fs.stat(filePath, (err, stats) => {
         if (err) {
-          console.error(`Failed to delete video file: ${filePath}`, err);
-        } else {
-          console.log(`Deleted video file: ${filePath}`);
+          console.error('Error getting file stats:', err);
+          return;
+        }
+
+        const fileAge = currentTime - stats.mtimeMs;
+        if (fileAge > expirationTime) {
+          fs.unlink(filePath, (err) => {
+            if (err) {
+              console.error(`Failed to delete old video file: ${filePath}`, err);
+            } else {
+              console.log(`Deleted old video file: ${filePath}`);
+            }
+          });
         }
       });
     });
   });
 }
 
+async function checkIfAudioOnly(filePath) {
+  return new Promise((resolve, reject) => {
+    ffmpeg.ffprobe(filePath, (err, metadata) => {
+      if (err) {
+        console.error('Error checking if file is audio-only:', err);
+        return reject(err);
+      }
+      
+      const hasVideoStream = metadata.streams.some(stream => stream.codec_type === 'video');
+      resolve(!hasVideoStream);
+    });
+  });
+}
+
 async function compressVideo(inputPath, outputPath) {
   return new Promise((resolve, reject) => {
-    ffmpeg.run(`-i ${inputPath} -vcodec libx264 -crf 28 ${outputPath}`)
-      .then(() => {
+    const timeout = setTimeout(() => {
+      console.error('Compression took too long and was aborted.');
+      if (fs.existsSync(inputPath)) fs.unlinkSync(inputPath);
+      if (fs.existsSync(outputPath)) fs.unlinkSync(outputPath);
+      reject(new Error('Compression took too long.'));
+    }, 60000);
+
+    ffmpeg(inputPath)
+      .videoCodec('libx264')
+      .outputOptions('-crf 28')
+      .save(outputPath)
+      .on('end', () => {
+        clearTimeout(timeout);
         console.log('Video compression finished.');
         resolve();
       })
-      .catch((err) => {
+      .on('error', (err) => {
+        clearTimeout(timeout);
         console.error('Compression error:', err);
         reject(err);
       });
@@ -57,9 +96,9 @@ function getFileSizeInMegabytes(filePath) {
 }
 
 async function downloadVideo(interaction, videoUrl) {
-  await interaction.reply('Processing your request...');
+  await interaction.deferReply(); // Az interakció elhalasztása
 
-  clearVideosDirectory();
+  await cleanOldVideos();
 
   const options = {
     method: 'GET',
@@ -89,6 +128,18 @@ async function downloadVideo(interaction, videoUrl) {
     writer.on('finish', async () => {
       console.log('Video successfully downloaded!');
 
+      if (!fs.existsSync(originalFilePath)) {
+        await interaction.editReply('❌ **The downloaded video file does not exist.**');
+        return;
+      }
+
+      const isAudioOnly = await checkIfAudioOnly(originalFilePath);
+      if (isAudioOnly) {
+        await interaction.editReply('❌ **The video is likely to be private or marked as adult content.**');
+        fs.unlinkSync(originalFilePath);
+        return;
+      }
+
       const fileSizeInMB = getFileSizeInMegabytes(originalFilePath);
       const thresholdSize = 8;
 
@@ -103,7 +154,13 @@ async function downloadVideo(interaction, videoUrl) {
           console.log(`Deleted video files after sending: ${originalFilePath} and ${compressedFilePath}`);
         } catch (error) {
           console.error('Error during compression:', error);
-          await interaction.editReply('❌ Error during video compression. **The compressed file is probably too large to send.**');
+          if (fs.existsSync(originalFilePath)) fs.unlinkSync(originalFilePath);
+          if (fs.existsSync(compressedFilePath)) fs.unlinkSync(compressedFilePath);
+          if (error.message === 'Compression took too long.') {
+            await interaction.editReply('❌ **Compression took too long. The video file is likely too large to compress!**');
+          } else {
+            await interaction.editReply('❌ Error during video compression. **The compressed file is probably too large to send.**');
+          }
         }
       } else {
         await interaction.editReply({ content: 'Your video is ready!', files: [originalFilePath] });
@@ -119,6 +176,9 @@ async function downloadVideo(interaction, videoUrl) {
     writer.on('error', async (err) => {
       console.error('Error during downloading the video:', err);
       await interaction.editReply('❌ **Error during downloading the video.** Try again!');
+      if (fs.existsSync(originalFilePath)) {
+        fs.unlinkSync(originalFilePath);
+      }
     });
 
   } catch (error) {
@@ -177,7 +237,7 @@ client.on('interactionCreate', async (interaction) => {
     console.log(`Processing link: ${url}`);
 
     if (!videoRegex.test(url)) {
-      await interaction.reply('❌ **Invalid URL!** Please provide a valid video link.');
+      await interaction.reply('❌ **Please provide a valid video link!**');
       return;
     }
 
