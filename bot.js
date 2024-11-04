@@ -3,6 +3,8 @@ const axios = require('axios');
 const fs = require('fs');
 const path = require('path');
 const ffmpeg = require('ffmpeg-cli');
+const { REST } = require('@discordjs/rest');
+const { Routes } = require('discord-api-types/v9');
 require('dotenv').config();
 
 const client = new Client({ intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.MessageContent] });
@@ -54,15 +56,8 @@ function getFileSizeInMegabytes(filePath) {
   return stats.size / (1024 * 1024);
 }
 
-async function downloadVideo(message, videoUrl) {
-  const loadingMessage = await message.reply('Processing your request...');
-  let loadingDots = 0;
-
-  const updateLoadingMessage = setInterval(async () => {
-    loadingDots = (loadingDots + 1) % 4;
-    const dots = '.'.repeat(loadingDots);
-    await loadingMessage.edit(`Processing your request${dots}`);
-  }, 500);
+async function downloadVideo(interaction, videoUrl) {
+  await interaction.reply('Processing your request...');
 
   clearVideosDirectory();
 
@@ -85,77 +80,108 @@ async function downloadVideo(message, videoUrl) {
       responseType: 'stream'
     });
 
-    const originalFilePath = path.join(videosDir, `downloaded_video_${message.id}.mp4`);
-    const compressedFilePath = path.join(videosDir, `compressed_video_${message.id}.mp4`);
-
-    if (fs.existsSync(originalFilePath)) {
-      fs.unlinkSync(originalFilePath);
-      console.log(`Deleted existing video file: ${originalFilePath}`);
-    }
+    const originalFilePath = path.join(videosDir, `downloaded_video_${interaction.id}.mp4`);
+    const compressedFilePath = path.join(videosDir, `compressed_video_${interaction.id}.mp4`);
 
     const writer = fs.createWriteStream(originalFilePath);
     videoResponse.data.pipe(writer);
 
     writer.on('finish', async () => {
-      clearInterval(updateLoadingMessage);
       console.log('Video successfully downloaded!');
 
       const fileSizeInMB = getFileSizeInMegabytes(originalFilePath);
       const thresholdSize = 8;
 
       if (fileSizeInMB > thresholdSize) {
-        loadingDots = 0;
-        const compressLoadingMessage = await loadingMessage.edit('🚨 **The video is too large!** Compressing...');
-        const updateCompressMessage = setInterval(async () => {
-          loadingDots = (loadingDots + 1) % 4;
-          const dots = '.'.repeat(loadingDots);
-          await compressLoadingMessage.edit(`🚨 **The video is too large!** Compressing${dots}`);
-        }, 500);
+        await interaction.editReply('🚨 **The video is too large!** Compressing...');
 
         try {
           await compressVideo(originalFilePath, compressedFilePath);
-          clearInterval(updateCompressMessage);
-          await loadingMessage.edit({ content: 'Your video is ready!', files: [compressedFilePath] });
+          await interaction.editReply({ content: 'Your video is ready!', files: [compressedFilePath] });
           fs.unlinkSync(originalFilePath);
           fs.unlinkSync(compressedFilePath);
           console.log(`Deleted video files after sending: ${originalFilePath} and ${compressedFilePath}`);
         } catch (error) {
-          clearInterval(updateCompressMessage);
           console.error('Error during compression:', error);
-          await loadingMessage.edit('❌ Error during video compression. **The compressed file is probably too large to send.**');
+          await interaction.editReply('❌ Error during video compression. **The compressed file is probably too large to send.**');
         }
       } else {
-        await loadingMessage.edit({ content: 'Your video is ready!', files: [originalFilePath] });
+        await interaction.editReply({ content: 'Your video is ready!', files: [originalFilePath] });
         fs.unlinkSync(originalFilePath);
         console.log(`Deleted video file after sending: ${originalFilePath}`);
       }
 
-      if (message.author.id === specialUserId) {
-        await message.reply('A kurva anyádat Szlöfety.');
+      if (interaction.user.id === specialUserId) {
+        await interaction.followUp('A kurva anyádat Szlöfety.');
       }
     });
 
     writer.on('error', async (err) => {
-      clearInterval(updateLoadingMessage);
       console.error('Error during downloading the video:', err);
-      await loadingMessage.edit('❌ Error during downloading the video. **Try again!**');
+      await interaction.editReply('❌ **Error during downloading the video.** Try again!');
     });
 
   } catch (error) {
-    clearInterval(updateLoadingMessage);
     console.error('Error:', error);
-    await loadingMessage.edit('❌ Something went wrong. **Check the URL again!**');
+    await interaction.editReply('❌ Something went wrong. **Check the URL again!**');
   }
 }
 
-client.on('messageCreate', async (message) => {
-  if (message.author.bot) return;
+async function registerCommands(guildId) {
+  const rest = new REST({ version: '9' }).setToken(process.env.DISCORD_BOT_TOKEN);
+  
+  try {
+    const existingCommands = await rest.get(Routes.applicationGuildCommands(process.env.DISCORD_CLIENT_ID, guildId));
+    await Promise.all(existingCommands.map(command => {
+      return rest.delete(Routes.applicationGuildCommand(process.env.DISCORD_CLIENT_ID, guildId, command.id));
+    }));
+    console.log('Successfully deleted existing commands.');
+  } catch (error) {
+    console.error('Error deleting existing commands:', error);
+  }
 
-  const foundLinks = message.content.match(videoRegex);
-  if (foundLinks) {
-    const videoUrl = foundLinks[0];
-    console.log(`Found a video link: ${videoUrl}`);
-    downloadVideo(message, videoUrl);
+  try {
+    console.log('Started registering application (/) commands.');
+    await rest.put(Routes.applicationGuildCommands(process.env.DISCORD_CLIENT_ID, guildId), {
+      body: [
+        {
+          name: 'link',
+          description: 'Send a video link',
+          options: [{
+            type: 3,
+            name: 'url',
+            description: 'The video URL',
+            required: true,
+          }],
+        },
+      ],
+    });
+    console.log('Successfully registered application commands.');
+  } catch (error) {
+    console.error('Error registering application commands:', error);
+  }
+}
+
+client.on('guildCreate', async (guild) => {
+  console.log(`Bot joined a new guild: ${guild.name} (ID: ${guild.id})`);
+  await registerCommands(guild.id);
+});
+
+client.on('interactionCreate', async (interaction) => {
+  if (!interaction.isCommand()) return;
+
+  const { commandName, options } = interaction;
+
+  if (commandName === 'link') {
+    const url = options.getString('url');
+    console.log(`Processing link: ${url}`);
+
+    if (!videoRegex.test(url)) {
+      await interaction.reply('❌ **Invalid URL!** Please provide a valid video link.');
+      return;
+    }
+
+    await downloadVideo(interaction, url);
   }
 });
 
