@@ -1,6 +1,8 @@
 # FetchFlix v1.0.0
 Facebook Videos / Reels and Instagram Reels automatically embedded videos from links on Discord.
 
+**commands:** /link {url link}
+
 ## Supported Links:
 
 ### Facebook:
